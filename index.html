@@ -493,6 +493,14 @@ tbody td {
 .btn-ghost { background: transparent; color: var(--text-muted); }
 .btn-ghost:hover { background: var(--bg-input); color: var(--text); }
 .btn-icon { padding: 8px; border-radius: var(--radius-sm); }
+.invoice-hidden-row { opacity: .72; background: var(--bg-input); }
+.invoice-hidden-row td { color: var(--text-muted); }
+.invoice-hidden-label {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; color: var(--text-muted);
+  background: var(--bg-table-head); border-radius: 6px; padding: 2px 6px;
+  margin-right: 5px;
+}
 
 /* ============================================================
    FORMS
@@ -974,6 +982,72 @@ select.form-control { cursor: pointer; }
 }
 
 /* ============================================================
+   STATEMENT ENTRIES — RESPONSIVE (جوال)
+   ============================================================ */
+@media (max-width: 600px) {
+  .statement-entry {
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    padding: 12px 12px;
+    position: relative;
+  }
+  /* الأيقونة والتاريخ في سطر واحد */
+  .entry-type-icon {
+    width: 30px;
+    height: 30px;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .entry-date {
+    width: auto;
+    flex: 1;
+    font-size: 11px;
+    align-self: center;
+  }
+  /* البيان يأخذ العرض الكامل */
+  .entry-desc {
+    width: 100%;
+    flex: none;
+    order: 3;
+    padding-right: 40px; /* محاذاة مع الأيقونة */
+  }
+  /* المبلغ والرصيد في سطر واحد بجانب بعض */
+  .entry-amount {
+    width: auto;
+    flex: 1;
+    order: 4;
+    font-size: 12px;
+    text-align: right;
+    min-width: 0;
+  }
+  .entry-balance {
+    width: auto;
+    flex: 1;
+    order: 5;
+    font-size: 12px;
+    text-align: left;
+    min-width: 0;
+  }
+  /* تسميات صغيرة فوق القيم */
+  .entry-amount::before {
+    content: 'المبلغ';
+    display: block;
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+  }
+  .entry-balance::before {
+    content: 'الرصيد';
+    display: block;
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+  }
+}
+
+/* ============================================================
    PRINT STYLES
    ============================================================ */
 @media print {
@@ -1243,8 +1317,16 @@ select.form-control { cursor: pointer; }
             <select class="filter-select" id="inv-supplier-filter" onchange="renderInvoices()">
               <option value="">كل المستودعات</option>
             </select>
+             <select class="filter-select" id="inv-visibility-filter" onchange="renderInvoices()">
+               <option value="visible">الفواتير الظاهرة</option>
+               <option value="hidden">الفواتير المخفية</option>
+               <option value="all">كل الفواتير</option>
+             </select>
           </div>
           <div class="toolbar-right">
+            <button class="btn btn-secondary btn-sm" id="show-hidden-invoices-btn" onclick="toggleHiddenInvoiceView()" title="إظهار الفواتير المخفية">
+              <i class="fa-solid fa-eye"></i> إظهار المخفية
+            </button>
             <button class="btn btn-secondary btn-sm" onclick="exportInvoicesPDF()">
               <i class="fa-solid fa-file-pdf"></i> طباعة PDF
             </button>
@@ -1322,6 +1404,9 @@ select.form-control { cursor: pointer; }
             <input type="hidden" id="stmt-supplier-id"/>
           </div>
           <div class="toolbar-right">
+             <button class="btn btn-secondary btn-sm" id="stmt-hidden-btn" onclick="toggleStatementHidden()" title="إظهار الفواتير المخفية في الكشف" style="display:none">
+               <i class="fa-solid fa-eye"></i> إظهار المخفية
+             </button>
             <button class="btn btn-secondary btn-sm" onclick="printStatement()">
               <i class="fa-solid fa-print"></i> طباعة
             </button>
@@ -1818,6 +1903,7 @@ const STATE = {
   // duplicate check timer
   _dupTimer: null,
   currentReport: null,
+  statementIncludeHidden: false,
   institutionName: localStorage.getItem('institutionName') || 'مؤسستي الصيدلانية'
 };
 
@@ -1922,7 +2008,7 @@ async function loadAll() {
     }
     if (invoices.success) {
       STATE.invoices = invoices.data || [];
-      document.getElementById('inv-badge').textContent = STATE.invoices.length;
+      document.getElementById('inv-badge').textContent = STATE.invoices.filter(i => !isInvoiceHidden(i)).length;
     }
     if (payments.success) {
       STATE.payments = payments.data || [];
@@ -2079,7 +2165,7 @@ function renderDashboard() {
 
   // آخر الفواتير
   const li = document.getElementById('last-invoices-table');
-  li.innerHTML = (d.lastInvoices || []).map(inv => `
+  li.innerHTML = (d.lastInvoices || []).filter(inv => !isInvoiceHidden(inv)).map(inv => `
     <tr>
       <td><strong>${esc(inv.SupplierName)}</strong></td>
       <td class="font-mono">${esc(inv.InvoiceNumber)}</td>
@@ -2221,23 +2307,12 @@ function renderSuppliers() {
 // INVOICES RENDER
 // ============================================================
 function renderInvoices() {
-  const q          = (document.getElementById('inv-search')?.value || '').toLowerCase();
+  const q            = (document.getElementById('inv-search')?.value || '').toLowerCase();
   const statusFilter = document.getElementById('inv-status-filter')?.value || '';
-  const supFilter  = document.getElementById('inv-supplier-filter')?.value || '';
-  const typeFilter = document.getElementById('inv-type-filter')?.value || '';
-  let data = [...STATE.invoices];
-
-  if (q) data = data.filter(r =>
-    (r.SupplierName||'').toLowerCase().includes(q) ||
-    (r.InvoiceNumber||'').toLowerCase().includes(q) ||
-    (r.Representative||'').toLowerCase().includes(q) ||
-    (r.Notes||'').toLowerCase().includes(q)
-  );
-  if (statusFilter) data = data.filter(r => r.Status === statusFilter);
-  if (supFilter)    data = data.filter(r => r.SupplierID === supFilter);
-  if (typeFilter)   data = data.filter(r => (r.PaymentType || 'آجل') === typeFilter);
-
-  data.sort((a,b) => new Date(b.CreatedAt) - new Date(a.CreatedAt));
+  const supFilter    = document.getElementById('inv-supplier-filter')?.value || '';
+  const typeFilter   = document.getElementById('inv-type-filter')?.value || '';
+  const visibility   = document.getElementById('inv-visibility-filter')?.value || 'visible';
+  const data         = getFilteredInvoices();
 
   const total = data.length;
   const start = (STATE.invPage - 1) * STATE.invPageSize;
@@ -2245,14 +2320,15 @@ function renderInvoices() {
 
   const tbody = document.getElementById('invoices-table');
   tbody.innerHTML = page.map((r, i) => `
-    <tr>
+    <tr class="${isInvoiceHidden(r) ? 'invoice-hidden-row' : ''}" data-hidden="${isInvoiceHidden(r) ? 'true' : 'false'}">
       <td class="text-muted">${start+i+1}</td>
       <td>
         <div style="font-weight:700">${esc(r.SupplierName)}</div>
         <div style="font-size:11px;color:var(--text-muted)">${esc(r.Representative||'')}</div>
       </td>
       <td>${esc(r.Representative||'—')}</td>
-      <td class="font-mono"><strong>${esc(r.InvoiceNumber)}</strong>
+       <td class="font-mono"><strong>${esc(r.InvoiceNumber)}</strong>
+         ${isInvoiceHidden(r) ? '<span class="invoice-hidden-label"><i class="fa-solid fa-eye-slash"></i> مخفية</span>' : ''}
         ${r.AttachmentURL ? `<a href="${esc(r.AttachmentURL)}" target="_blank" title="عرض المرفق" style="margin-right:4px"><i class="fa-solid fa-paperclip" style="color:var(--primary)"></i></a>` : ''}
       </td>
       <td><strong>${fmt(r.Amount)} ${CURRENCY}</strong></td>
@@ -2269,6 +2345,11 @@ function renderInvoices() {
           <button class="btn btn-ghost btn-sm btn-icon" title="تعديل" onclick="editInvoice('${r.ID}')">
             <i class="fa-solid fa-pen"></i>
           </button>
+           <button class="btn btn-ghost btn-sm btn-icon" title="${isInvoiceHidden(r) ? 'إلغاء إخفاء الفاتورة' : 'إخفاء الفاتورة'}"
+             style="color:${isInvoiceHidden(r) ? 'var(--success)' : 'var(--warning)'}"
+             onclick="toggleInvoiceHidden('${r.ID}', ${isInvoiceHidden(r) ? 'false' : 'true'})">
+             <i class="fa-solid ${isInvoiceHidden(r) ? 'fa-eye' : 'fa-eye-slash'}"></i>
+           </button>
           <button class="btn btn-ghost btn-sm btn-icon" style="color:var(--danger)" title="حذف" onclick="deleteInvoice('${r.ID}','${esc(r.InvoiceNumber)}')">
             <i class="fa-solid fa-trash"></i>
           </button>
@@ -2276,10 +2357,99 @@ function renderInvoices() {
       </td>
     </tr>
   `).join('') || `<tr><td colspan="11" class="table-empty">
-    <i class="fa-solid fa-file-invoice"></i>لا توجد فواتير${q||statusFilter||supFilter ? ' مطابقة' : ''}
+     <i class="fa-solid fa-file-invoice"></i>لا توجد فواتير${q||statusFilter||supFilter||typeFilter||visibility !== 'visible' ? ' مطابقة' : ''}
   </td></tr>`;
 
   renderPagination('inv', total, STATE.invPage, STATE.invPageSize, p => { STATE.invPage = p; renderInvoices(); });
+  updateHiddenInvoiceViewButton();
+}
+
+function isInvoiceHidden(invoice) {
+  const value = invoice && invoice.Hidden;
+  return value === true ||
+    String(value || '').toLowerCase() === 'true' ||
+    String(value || '') === '1' ||
+    String(value || '') === 'نعم';
+}
+
+function getFilteredInvoices(forceVisible = false) {
+  const q            = (document.getElementById('inv-search')?.value || '').toLowerCase();
+  const statusFilter = document.getElementById('inv-status-filter')?.value || '';
+  const supFilter    = document.getElementById('inv-supplier-filter')?.value || '';
+  const typeFilter   = document.getElementById('inv-type-filter')?.value || '';
+  const visibility   = forceVisible ? 'visible' : (document.getElementById('inv-visibility-filter')?.value || 'visible');
+  let data = [...STATE.invoices];
+
+  if (visibility === 'visible') data = data.filter(r => !isInvoiceHidden(r));
+  if (visibility === 'hidden')  data = data.filter(r => isInvoiceHidden(r));
+  if (q) data = data.filter(r =>
+    (r.SupplierName||'').toLowerCase().includes(q) ||
+    (r.InvoiceNumber||'').toLowerCase().includes(q) ||
+    (r.Representative||'').toLowerCase().includes(q) ||
+    (r.Notes||'').toLowerCase().includes(q)
+  );
+  if (statusFilter) data = data.filter(r => r.Status === statusFilter);
+  if (supFilter)    data = data.filter(r => r.SupplierID === supFilter);
+  if (typeFilter)   data = data.filter(r => (r.PaymentType || 'آجل') === typeFilter);
+
+  return data.sort((a,b) => new Date(b.CreatedAt) - new Date(a.CreatedAt));
+}
+
+function getActiveInvoices() {
+  return STATE.invoices.filter(invoice => !isInvoiceHidden(invoice));
+}
+
+async function toggleInvoiceHidden(id, hidden) {
+  const invoice = STATE.invoices.find(item => item.ID === id);
+  if (!invoice) return;
+  const message = hidden
+    ? 'سيتم استبعاد الفاتورة من الأرصدة والتقارير وملفات PDF. هل تريد المتابعة؟'
+    : 'ستعود الفاتورة إلى الأرصدة والتقارير وملفات PDF. هل تريد المتابعة؟';
+  showConfirm(
+    hidden ? '👁️' : '👁️',
+    hidden ? 'إخفاء الفاتورة' : 'إلغاء إخفاء الفاتورة',
+    `<strong>الفاتورة رقم ${esc(invoice.InvoiceNumber)}</strong><br>${message}`,
+    async () => {
+      showLoading(hidden ? 'جاري إخفاء الفاتورة...' : 'جاري إظهار الفاتورة...');
+      try {
+        const res = await apiPost({ action: 'toggleInvoiceHidden', id, hidden });
+        if (!res.success) {
+          showToast('error', 'خطأ', res.error || 'تعذر تحديث حالة الفاتورة');
+          return;
+        }
+        showToast('success', 'تم التحديث', res.message);
+        await loadAll();
+        const statementId = document.getElementById('stmt-supplier-id')?.value;
+        const statementName = document.getElementById('stmt-supplier-input')?.value || '';
+        if (statementId && STATE.currentPage === 'statement') {
+          await loadStatement(statementId, statementName);
+        }
+      } catch (e) {
+        showToast('error', 'خطأ', 'فشل تحديث حالة الفاتورة');
+      } finally {
+        hideLoading();
+      }
+    }
+  );
+}
+
+function toggleHiddenInvoiceView() {
+  const filter = document.getElementById('inv-visibility-filter');
+  if (!filter) return;
+  filter.value = filter.value === 'hidden' ? 'visible' : 'hidden';
+  STATE.invPage = 1;
+  renderInvoices();
+}
+
+function updateHiddenInvoiceViewButton() {
+  const button = document.getElementById('show-hidden-invoices-btn');
+  const filter = document.getElementById('inv-visibility-filter');
+  if (!button || !filter) return;
+  const hiddenView = filter.value === 'hidden';
+  button.innerHTML = hiddenView
+    ? '<i class="fa-solid fa-eye-slash"></i> إخفاء المخفية'
+    : '<i class="fa-solid fa-eye"></i> إظهار المخفية';
+  button.title = hiddenView ? 'العودة إلى الفواتير الظاهرة' : 'إظهار الفواتير المخفية';
 }
 
 // ============================================================
@@ -2305,14 +2475,20 @@ function renderPayments() {
   const page  = data.slice(start, start + STATE.payPageSize);
 
   const tbody = document.getElementById('payments-table');
-  tbody.innerHTML = page.map((r, i) => `
+  tbody.innerHTML = page.map((r, i) => {
+    // FIX: بعض البيانات القديمة تحتوي على قيمة الدفعة في حقل Representative
+    // بسبب عدم تطابق ترتيب الأعمدة في الجدول. نستخدم r.Amount إذا كان > 0،
+    // وإلا نقرأ من r.Representative كبديل للبيانات القديمة.
+    const payAmt = (parseFloat(r.Amount) > 0)
+      ? parseFloat(r.Amount)
+      : parseFloat(r.Representative) || 0;
+    return `
     <tr>
       <td class="text-muted">${start+i+1}</td>
       <td>
         <div style="font-weight:700">${esc(r.SupplierName)}</div>
-        <div style="font-size:11px;color:var(--text-muted)">${esc(r.Representative||'')}</div>
       </td>
-      <td style="color:var(--success);font-weight:700">${fmt(r.Amount)} ${CURRENCY}</td>
+      <td style="color:var(--success);font-weight:700">${fmt(payAmt)} ${CURRENCY}</td>
       <td class="font-mono">${r.ReceiptNumber ? esc(r.ReceiptNumber) : '—'}</td>
       <td class="text-muted">${esc(r.PaymentDate||'')}</td>
       <td class="text-muted" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.Notes||'—')}</td>
@@ -2326,8 +2502,8 @@ function renderPayments() {
           </button>
         </div>
       </td>
-    </tr>
-  `).join('') || `<tr><td colspan="7" class="table-empty">
+    </tr>`;
+  }).join('') || `<tr><td colspan="7" class="table-empty">
     <i class="fa-solid fa-money-bill-wave"></i>لا توجد دفعات${q||supFilter ? ' مطابقة' : ''}
   </td></tr>`;
 
@@ -2751,7 +2927,10 @@ async function loadStatement(id, name) {
 
   showLoading('جاري تحميل كشف الحساب...');
   try {
-    const res = await api('getStatement', { supplierId: id });
+    const res = await api('getStatement', {
+      supplierId: id,
+      includeHidden: STATE.statementIncludeHidden
+    });
     hideLoading();
     if (!res.success) { showToast('error', 'خطأ', res.error); return; }
 
@@ -2763,7 +2942,8 @@ async function loadStatement(id, name) {
           <p>${sup.Representative ? 'المندوب: ' + esc(sup.Representative) : ''} ${sup.RepPhone ? '• ' + sup.RepPhone : ''}</p>
         </div>
         <div style="text-align:left;font-size:12px;opacity:.8">
-          <div>عدد الفواتير: ${res.totalInvoices}</div>
+           <div>عدد الفواتير: ${res.totalInvoices}</div>
+           ${res.hiddenInvoiceCount ? `<div>المخفية: ${res.hiddenInvoiceCount}</div>` : ''}
           <div>عدد الدفعات: ${res.totalPayments}</div>
         </div>
       </div>
@@ -2788,13 +2968,15 @@ async function loadStatement(id, name) {
     `;
 
     document.getElementById('stmt-entries').innerHTML = res.entries.map(e => `
-      <div class="statement-entry">
+      <div class="statement-entry ${e.hidden ? 'invoice-hidden-row' : ''}">
         <div class="entry-type-icon ${e.type}">
           <i class="fa-solid fa-${e.type === 'invoice' ? 'file-invoice' : 'money-bill'}"></i>
         </div>
         <div class="entry-date">${esc(e.date||'')}</div>
         <div class="entry-desc">
-          <div class="desc-title">${esc(e.label)}</div>
+           <div class="desc-title">${esc(e.label)}
+             ${e.hidden ? '<span class="invoice-hidden-label"><i class="fa-solid fa-eye-slash"></i> مخفية</span>' : ''}
+           </div>
           ${e.notes ? `<div class="desc-note">${esc(e.notes)}</div>` : ''}
         </div>
         <div class="entry-amount ${e.type === 'invoice' ? 'debit' : 'credit'}" style="${e.paymentType==='نقدي'?'color:var(--text-muted)':''}">
@@ -2812,11 +2994,39 @@ async function loadStatement(id, name) {
     const fb = document.getElementById('stmt-final-balance');
     fb.textContent = `${fmt(res.finalBalance)} ${CURRENCY}`;
     fb.style.color = res.finalBalance > 0 ? 'var(--danger)' : 'var(--success)';
+    updateStatementHiddenButton(res.hiddenInvoiceCount || 0);
 
   } catch(e) {
     hideLoading();
     showToast('error', 'خطأ', 'فشل تحميل كشف الحساب');
   }
+}
+
+function toggleStatementHidden() {
+  const id = document.getElementById('stmt-supplier-id')?.value;
+  const name = document.getElementById('stmt-supplier-input')?.value || '';
+  if (!id) {
+    showToast('warning', 'تنبيه', 'يرجى اختيار مستودع أولاً');
+    return;
+  }
+  STATE.statementIncludeHidden = !STATE.statementIncludeHidden;
+  loadStatement(id, name);
+}
+
+function updateStatementHiddenButton(hiddenCount) {
+  const button = document.getElementById('stmt-hidden-btn');
+  if (!button) return;
+  if (!hiddenCount && !STATE.statementIncludeHidden) {
+    button.style.display = 'none';
+    return;
+  }
+  button.style.display = 'inline-flex';
+  button.innerHTML = STATE.statementIncludeHidden
+    ? '<i class="fa-solid fa-eye-slash"></i> إخفاء الفواتير المخفية'
+    : '<i class="fa-solid fa-eye"></i> إظهار المخفية';
+  button.title = STATE.statementIncludeHidden
+    ? 'إخفاء الفواتير المخفية من الكشف'
+    : 'إظهار الفواتير المخفية في الكشف';
 }
 
 // ============================================================
@@ -2841,11 +3051,11 @@ async function runReport(type) {
   if (type === 'all-statement' || type === 'balances') {
     html = buildSuppliersTable(STATE.suppliers);
   } else if (type === 'unpaid') {
-    html = buildInvoicesTable(STATE.invoices.filter(i => i.Status === 'غير مسدد'));
+    html = buildInvoicesTable(getActiveInvoices().filter(i => i.Status === 'غير مسدد'));
   } else if (type === 'partial') {
-    html = buildInvoicesTable(STATE.invoices.filter(i => i.Status === 'مسدد جزئياً'));
+    html = buildInvoicesTable(getActiveInvoices().filter(i => i.Status === 'مسدد جزئياً'));
   } else if (type === 'paid') {
-    html = buildInvoicesTable(STATE.invoices.filter(i => i.Status === 'مسدد'));
+    html = buildInvoicesTable(getActiveInvoices().filter(i => i.Status === 'مسدد'));
   } else if (type === 'monthly') {
     html = buildMonthlyTable();
   }
@@ -2945,7 +3155,7 @@ function exportSuppliers() {
 }
 
 function exportInvoices() {
-  const data = STATE.invoices.map(r => ({
+  const data = getActiveInvoices().map(r => ({
     'المستودع': r.SupplierName, 'المندوب': r.Representative, 'رقم الفاتورة': r.InvoiceNumber,
     'القيمة - ل.س': r.Amount, 'نوع الدفع': r.PaymentType||'آجل',
     'المدفوع - ل.س': r.PaidAmount, 'الرصيد - ل.س': r.Balance,
@@ -2974,9 +3184,9 @@ function exportToExcel(data, sheetName) {
 
 function exportReportExcel() {
   if (STATE.currentReport === 'all-statement' || STATE.currentReport === 'balances') exportSuppliers();
-  else if (STATE.currentReport === 'unpaid')   exportToExcel(STATE.invoices.filter(i => i.Status === 'غير مسدد').map(r => ({ 'المستودع': r.SupplierName, 'رقم الفاتورة': r.InvoiceNumber, 'القيمة - ل.س': r.Amount, 'الرصيد - ل.س': r.Balance, 'التاريخ': r.InputDate })), 'غير مسدد');
-  else if (STATE.currentReport === 'partial')  exportToExcel(STATE.invoices.filter(i => i.Status === 'مسدد جزئياً').map(r => ({ 'المستودع': r.SupplierName, 'رقم الفاتورة': r.InvoiceNumber, 'القيمة - ل.س': r.Amount, 'المدفوع - ل.س': r.PaidAmount, 'الرصيد - ل.س': r.Balance })), 'جزئي');
-  else if (STATE.currentReport === 'paid')     exportToExcel(STATE.invoices.filter(i => i.Status === 'مسدد').map(r => ({ 'المستودع': r.SupplierName, 'رقم الفاتورة': r.InvoiceNumber, 'القيمة - ل.س': r.Amount })), 'مسدد');
+  else if (STATE.currentReport === 'unpaid')   exportToExcel(getActiveInvoices().filter(i => i.Status === 'غير مسدد').map(r => ({ 'المستودع': r.SupplierName, 'رقم الفاتورة': r.InvoiceNumber, 'القيمة - ل.س': r.Amount, 'الرصيد - ل.س': r.Balance, 'التاريخ': r.InputDate })), 'غير مسدد');
+  else if (STATE.currentReport === 'partial')  exportToExcel(getActiveInvoices().filter(i => i.Status === 'مسدد جزئياً').map(r => ({ 'المستودع': r.SupplierName, 'رقم الفاتورة': r.InvoiceNumber, 'القيمة - ل.س': r.Amount, 'المدفوع - ل.س': r.PaidAmount, 'الرصيد - ل.س': r.Balance })), 'جزئي');
+  else if (STATE.currentReport === 'paid')     exportToExcel(getActiveInvoices().filter(i => i.Status === 'مسدد').map(r => ({ 'المستودع': r.SupplierName, 'رقم الفاتورة': r.InvoiceNumber, 'القيمة - ل.س': r.Amount })), 'مسدد');
 }
 
 // ─── PDF print helpers ──────────────────────────────────────────────────────
@@ -3022,24 +3232,24 @@ function _printWindow(htmlBody, title) {
 // ─── PDF تنزيل مباشر (بدون نافذة طباعة) ────────────────────────────────────
 async function _downloadPDF(htmlBody, title) {
   showLoading('جاري إنشاء ملف PDF...');
+  var tmpDiv = null;
   try {
     var instName = STATE.institutionName || 'مدير المستودعات';
     var now      = new Date().toLocaleDateString('ar-EG');
 
-    // ─── div مؤقت خارج نطاق الرؤية تماماً ──────────────────────────────────
-    // position:absolute + left:-9999px يضمن:
-    // 1. عدم تأثيره على واجهة المستخدم
-    // 2. قياس الارتفاع الكامل للمحتوى بشكل صحيح (scrollHeight يعمل بدقة)
-    // 3. html2canvas يلتقط المحتوى بالكامل دون اقتطاع
-    var tmpDiv = document.createElement('div');
+    // ─── عنصر مؤقت خارج مجال العرض ─────────────────────────────────────────
+    // يبقى العنصر مرئياً للـ html2canvas وله أبعاد حقيقية، مع وضعه خارج
+    // الشاشة بصرياً؛ وهذا يمنع مشكلة ملف PDF الفارغ.
+    tmpDiv = document.createElement('div');
     tmpDiv.style.cssText = [
-      'position:absolute', 'top:0', 'left:-9999px',
-      'visibility:hidden', 'pointer-events:none',
+      'position:absolute', 'top:0', 'left:-10000px',
+      'pointer-events:none', 'z-index:0',
       'width:794px',
       'padding:28px 36px 36px',
       'background:#ffffff', 'color:#1e293b',
       'font-family:Cairo,Tahoma,Arial,sans-serif',
       'direction:rtl', 'font-size:13px', 'line-height:1.7',
+      'visibility:visible', 'opacity:1',
       'box-sizing:border-box'
     ].join(';');
 
@@ -3056,12 +3266,7 @@ async function _downloadPDF(htmlBody, title) {
     await new Promise(function(r){ setTimeout(r, 600); });
 
     // قياس الارتفاع الفعلي الكامل للمحتوى
-    // scrollHeight هنا دقيق لأن العنصر absolute وليس fixed
     var renderH = Math.max(tmpDiv.scrollHeight, tmpDiv.offsetHeight, 300);
-
-    // إظهار مؤقت لـ html2canvas (يحتاج opacity > 0 ليلتقط المحتوى)
-    tmpDiv.style.visibility = 'visible';
-    tmpDiv.style.opacity    = '0';
 
     var canvas = await html2canvas(tmpDiv, {
       scale: 2,
@@ -3076,12 +3281,12 @@ async function _downloadPDF(htmlBody, title) {
       x: 0,
       y: 0,
       scrollX: 0,
-      scrollY: 0
+       scrollY: 0
     });
-    document.body.removeChild(tmpDiv);
 
     // ─── إنشاء PDF مع دعم تعدد الصفحات ───────────────────────────────────
     var JsPDF   = (window.jspdf && window.jspdf.jsPDF) || window.jspdf;
+    if (!JsPDF) throw new Error('مكتبة PDF غير متاحة — تحقق من اتصال الإنترنت ثم أعد المحاولة');
     var doc     = new JsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
 
     var imgData  = canvas.toDataURL('image/jpeg', 0.95);
@@ -3137,6 +3342,7 @@ async function _downloadPDF(htmlBody, title) {
     showToast('error', 'خطأ', 'فشل إنشاء PDF: ' + err.message);
     console.error('_downloadPDF error:', err);
   } finally {
+    if (tmpDiv && tmpDiv.parentNode) tmpDiv.parentNode.removeChild(tmpDiv);
     hideLoading();
   }
 }
@@ -3171,9 +3377,20 @@ function exportSuppliersPDF() {
   _downloadPDF(h, 'المستودعات');
 }
 function exportInvoicesPDF() {
-  var h = _tableHtmlForExport(document.querySelector('#page-invoices .table-wrapper'));
+  // لا نعتمد على الجدول المعروض لأن المستخدم قد يكون في وضع الفواتير المخفية.
+  // يتم بناء ملف PDF دائماً من الفواتير الظاهرة فقط.
+  var activeInvoices = getFilteredInvoices(true);
+  if (!activeInvoices.length) { showToast('warning','تنبيه','لا توجد فواتير ظاهرة للتصدير'); return; }
+  var h = _tableHtmlForExportFromHtml(buildInvoicesTable(activeInvoices));
   if (!h) { showToast('warning','تنبيه','لا توجد بيانات'); return; }
   _downloadPDF(h, 'الفواتير');
+}
+
+function _tableHtmlForExportFromHtml(html) {
+  if (!html || html.indexOf('<table') < 0) return null;
+  var holder = document.createElement('div');
+  holder.innerHTML = html;
+  return _tableHtmlForExport(holder);
 }
 function exportPaymentsPDF() {
   var h = _tableHtmlForExport(document.querySelector('#page-payments .table-wrapper'));
@@ -3198,6 +3415,9 @@ function _stmtTableHtml() {
   var rows = '';
   var finalBal = (document.getElementById('stmt-final-balance')?.textContent || '').trim();
   document.querySelectorAll('.statement-entry').forEach(function(e) {
+    // الفاتورة المخفية يمكن عرضها للمراجعة داخل الكشف، لكنها لا تدخل
+    // في الطباعة أو PDF أو أي تصدير.
+    if (e.classList.contains('invoice-hidden-row')) return;
     var date    = (e.querySelector('.entry-date')?.textContent   || '').trim();
     var desc    = (e.querySelector('.desc-title')?.textContent   || '').trim();
     var note    = (e.querySelector('.desc-note')?.textContent    || '').trim();
@@ -3238,6 +3458,7 @@ async function exportStatementExcel() {
   const entries = document.querySelectorAll('.statement-entry');
   const data = [];
   entries.forEach(e => {
+    if (e.classList.contains('invoice-hidden-row')) return;
     const date    = e.querySelector('.entry-date')?.textContent.trim();
     const desc    = e.querySelector('.desc-title')?.textContent.trim();
     const amount  = e.querySelector('.entry-amount')?.textContent.trim();
@@ -3546,7 +3767,7 @@ function setupGlobalSearch() {
     const supMatches = STATE.suppliers.filter(s =>
       (s.Name||'').toLowerCase().includes(q) || (s.Representative||'').toLowerCase().includes(q)
     ).slice(0, 5);
-    const invMatches = STATE.invoices.filter(i =>
+    const invMatches = getActiveInvoices().filter(i =>
       (i.InvoiceNumber||'').toLowerCase().includes(q) || (i.SupplierName||'').toLowerCase().includes(q)
     ).slice(0, 5);
 
