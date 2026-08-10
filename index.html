@@ -23,6 +23,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.6.0/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<!-- PDF.js: يقرأ الملف الأصلي كاملاً للتحقق من عدد الصفحات قبل وبعد الرفع -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
 <style>
 /* ============================================================
@@ -1317,10 +1319,9 @@ select.form-control { cursor: pointer; }
             <select class="filter-select" id="inv-supplier-filter" onchange="renderInvoices()">
               <option value="">كل المستودعات</option>
             </select>
-             <select class="filter-select" id="inv-visibility-filter" onchange="renderInvoices()">
+             <select class="filter-select" id="inv-visibility-filter" onchange="handleInvoiceVisibilityFilterChange()">
                <option value="visible">الفواتير الظاهرة</option>
                <option value="hidden">الفواتير المخفية</option>
-               <option value="all">كل الفواتير</option>
              </select>
           </div>
           <div class="toolbar-right">
@@ -1762,11 +1763,19 @@ select.form-control { cursor: pointer; }
         <i class="fa-solid fa-triangle-exclamation"></i>
         <strong>آجل:</strong> ستُسجَّل الفاتورة كدين على المؤسسة وتُضاف للرصيد المطلوب.
       </div>
-      <div class="form-group">
-        <label class="form-label">رابط المرفق (اختياري)</label>
+       <div class="form-group">
+         <label class="form-label">ملف الفاتورة PDF (اختياري)</label>
+         <input type="file" class="form-control" id="inv-pdf-file" accept="application/pdf,.pdf"
+           onchange="inspectInvoicePdf(this.files[0])"/>
+         <div class="form-hint" id="inv-pdf-status">
+           يُرفع الملف الأصلي كاملاً ويُتحقق من حجمه وعدد صفحاته قبل حفظه.
+         </div>
+       </div>
+       <div class="form-group">
+         <label class="form-label">رابط مرفق خارجي (اختياري)</label>
         <input type="url" class="form-control" id="inv-attachment"
           placeholder="https://drive.google.com/..."/>
-        <div class="form-hint">ارفع الملف على Google Drive وانسخ الرابط هنا</div>
+         <div class="form-hint">يمكن استخدامه بدلاً من رفع ملف PDF من الجهاز.</div>
       </div>
       <div class="form-group">
         <label class="form-label">ملاحظات</label>
@@ -1902,6 +1911,7 @@ const STATE = {
   statusChart: null,
   // duplicate check timer
   _dupTimer: null,
+  pdfMeta: null,
   currentReport: null,
   statementIncludeHidden: false,
   institutionName: localStorage.getItem('institutionName') || 'مؤسستي الصيدلانية'
@@ -2380,8 +2390,13 @@ function getFilteredInvoices(forceVisible = false) {
   const visibility   = forceVisible ? 'visible' : (document.getElementById('inv-visibility-filter')?.value || 'visible');
   let data = [...STATE.invoices];
 
+  // الوضع الافتراضي والتصدير يعرضان الفواتير الظاهرة فقط.
+  // الفواتير المخفية لا تُعرض إلا من خلال زر العين وبعد اختيار مستودع محدد.
   if (visibility === 'visible') data = data.filter(r => !isInvoiceHidden(r));
-  if (visibility === 'hidden')  data = data.filter(r => isInvoiceHidden(r));
+  if (visibility === 'hidden') {
+    if (!supFilter) return [];
+    data = data.filter(r => isInvoiceHidden(r) && r.SupplierID === supFilter);
+  }
   if (q) data = data.filter(r =>
     (r.SupplierName||'').toLowerCase().includes(q) ||
     (r.InvoiceNumber||'').toLowerCase().includes(q) ||
@@ -2436,7 +2451,24 @@ async function toggleInvoiceHidden(id, hidden) {
 function toggleHiddenInvoiceView() {
   const filter = document.getElementById('inv-visibility-filter');
   if (!filter) return;
+  const supplier = document.getElementById('inv-supplier-filter')?.value || '';
+  if (filter.value !== 'hidden' && !supplier) {
+    showToast('warning', 'اختر مستودعاً أولاً', 'عرض الفواتير المخفية متاح للمستودع المحدد فقط');
+    return;
+  }
   filter.value = filter.value === 'hidden' ? 'visible' : 'hidden';
+  STATE.invPage = 1;
+  renderInvoices();
+}
+
+function handleInvoiceVisibilityFilterChange() {
+  const filter = document.getElementById('inv-visibility-filter');
+  const supplier = document.getElementById('inv-supplier-filter')?.value || '';
+  if (filter?.value === 'hidden' && !supplier) {
+    filter.value = 'visible';
+    showToast('warning', 'اختر مستودعاً أولاً', 'عرض الفواتير المخفية مرتبط بمستودع واحد');
+    return;
+  }
   STATE.invPage = 1;
   renderInvoices();
 }
@@ -2590,6 +2622,23 @@ async function saveSupplier() {
 
   showLoading('جاري الحفظ...');
   try {
+    const pdfFile = document.getElementById('inv-pdf-file')?.files?.[0];
+    if (pdfFile) {
+      if (!STATE.pdfMeta || STATE.pdfMeta.file !== pdfFile) {
+        await inspectInvoicePdf(pdfFile);
+      }
+      if (!STATE.pdfMeta || STATE.pdfMeta.file !== pdfFile || !STATE.pdfMeta.pageCount) {
+        throw new Error('تعذر التحقق من ملف PDF قبل الحفظ');
+      }
+      showLoading('جاري رفع ملف PDF كاملاً...');
+      const uploaded = await uploadInvoicePdf(pdfFile, STATE.pdfMeta);
+      if (!uploaded || !uploaded.verified) {
+        throw new Error('فشل التحقق من اكتمال ملف PDF بعد الرفع');
+      }
+      data.attachmentUrl = uploaded.url;
+      data.pdfByteSize = uploaded.byteSize;
+      data.pdfPageCount = uploaded.pageCount;
+    }
     const res = await apiPost(data);
     if (res.success) {
       closeModal('supplier-modal');
@@ -2643,6 +2692,11 @@ function openInvoiceModal(data = null) {
   document.getElementById('inv-amount').value           = data?.Amount         || '';
   document.getElementById('inv-payment-type').value     = data?.PaymentType    || 'آجل';
   document.getElementById('inv-attachment').value       = data?.AttachmentURL  || '';
+  document.getElementById('inv-pdf-file').value         = '';
+  STATE.pdfMeta = null;
+  document.getElementById('inv-pdf-status').textContent = data?.PdfPageCount
+    ? `ملف محفوظ ومتحقق منه: ${data.PdfPageCount} صفحة — ${fmtBytes(data.PdfByteSize)}`
+    : 'يُرفع الملف الأصلي كاملاً ويُتحقق من حجمه وعدد صفحاته قبل حفظه.';
   document.getElementById('inv-notes').value            = data?.Notes          || '';
   document.getElementById('inv-sup-err').classList.remove('show');
   document.getElementById('inv-num-err').classList.remove('show');
@@ -2724,6 +2778,87 @@ async function checkInvoiceDuplicate() {
   }, 400);
 }
 
+async function inspectInvoicePdf(file) {
+  const status = document.getElementById('inv-pdf-status');
+  STATE.pdfMeta = null;
+  if (!file) {
+    if (status) status.textContent = 'يُرفع الملف الأصلي كاملاً ويُتحقق من حجمه وعدد صفحاته قبل حفظه.';
+    return null;
+  }
+  if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+    throw new Error('يرجى اختيار ملف PDF صالح');
+  }
+  if (status) status.textContent = 'جاري فحص الملف الأصلي وعدّ صفحاته...';
+  const buffer = await file.arrayBuffer();
+  if (buffer.byteLength !== file.size) throw new Error('تعذر قراءة كامل ملف PDF');
+  if (!window.pdfjsLib) throw new Error('مكتبة قراءة PDF غير متاحة');
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const pdf = await window.pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+  const sha256 = await sha256Hex(buffer);
+  STATE.pdfMeta = { file, buffer, byteSize: file.size, pageCount: pdf.numPages, sha256 };
+  if (status) status.textContent =
+    `تم فحص الملف: ${pdf.numPages} صفحة — ${fmtBytes(file.size)}. سيتم رفعه كاملاً.`;
+  return STATE.pdfMeta;
+}
+
+async function uploadInvoicePdf(file, meta) {
+  const bytes = new Uint8Array(meta.buffer);
+  const uploadId = 'PDF-' + Date.now().toString(36) + '-' +
+    Math.random().toString(36).slice(2, 8);
+  // Apps Script قد يفرض حداً صغيراً لطول URL بعد ترميز Base64؛
+  // دفعات 512 بايت تمنع القص حتى مع أسماء الملفات والروابط الطويلة.
+  const chunkBytes = 512;
+  const totalChunks = Math.ceil(bytes.length / chunkBytes);
+  for (let index = 0; index < totalChunks; index++) {
+    const part = bytes.subarray(index * chunkBytes, Math.min(bytes.length, (index + 1) * chunkBytes));
+    let binary = '';
+    for (let i = 0; i < part.length; i++) binary += String.fromCharCode(part[i]);
+    const result = await apiPost({
+      action: 'uploadPdfChunk',
+      uploadId,
+      chunkIndex: index,
+      totalChunks,
+      chunkData: btoa(binary)
+    });
+    if (!result.success) throw new Error(result.error || `فشل رفع الدفعة ${index + 1}`);
+    if ((index + 1) % 10 === 0 || index + 1 === totalChunks) {
+      showLoading(`جاري رفع PDF: ${index + 1} / ${totalChunks}`);
+    }
+  }
+  const result = await apiPost({
+    action: 'finalizePdfUpload',
+    uploadId,
+    totalChunks,
+    fileName: file.name,
+    byteSize: meta.byteSize,
+    pageCount: meta.pageCount,
+    sha256: meta.sha256
+  });
+  if (!result.success || !result.verified ||
+      Number(result.byteSize) !== Number(meta.byteSize) ||
+      Number(result.pageCount) !== Number(meta.pageCount) ||
+      String(result.sha256 || '').toLowerCase() !== String(meta.sha256 || '').toLowerCase()) {
+    throw new Error((result && result.error) || 'فشل التحقق من مطابقة ملف PDF الأصلي');
+  }
+  return result;
+}
+
+async function sha256Hex(buffer) {
+  if (!window.crypto?.subtle) throw new Error('تعذر تشغيل التحقق الآمن من ملف PDF');
+  const digest = await window.crypto.subtle.digest('SHA-256', buffer);
+  return Array.from(new Uint8Array(digest))
+    .map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function fmtBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (!value) return '0 بايت';
+  const units = ['بايت', 'KB', 'MB', 'GB'];
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  return `${(value / Math.pow(1024, index)).toFixed(index ? 2 : 0)} ${units[index]}`;
+}
+
 async function saveInvoice() {
   const supId   = document.getElementById('inv-supplier-id').value;
   const supName = document.getElementById('inv-supplier-name').value.trim();
@@ -2772,7 +2907,7 @@ async function saveInvoice() {
       }
     }
   } catch(e) {
-    showToast('error', 'خطأ', 'فشل الاتصال');
+    showToast('error', 'خطأ', e.message || 'فشل حفظ الفاتورة');
   } finally {
     hideLoading();
   }
@@ -3347,6 +3482,100 @@ async function _downloadPDF(htmlBody, title) {
   }
 }
 
+// تصدير جدولي كامل لا يعتمد على الجزء المرئي من الصفحة.
+// يُقسّم الصفوف إلى صفحات قبل استخدام html2canvas، لذلك لا يوجد canvas
+// عملاق يقتطع الصفوف عند تجاوز حد المتصفح للارتفاع.
+async function _downloadPDFComplete(htmlBody, title) {
+  showLoading('جاري إنشاء ملف PDF كامل...');
+  var holder = null;
+  try {
+    var JsPDF = (window.jspdf && window.jspdf.jsPDF) || window.jspdf;
+    if (!JsPDF) throw new Error('مكتبة PDF غير متاحة');
+    var doc = new JsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    var margin = 12, pageW = 210, pageH = 297;
+    var contentW = pageW - margin * 2, contentH = pageH - margin * 2;
+    var instName = STATE.institutionName || 'مدير المستودعات';
+    var now = new Date().toLocaleDateString('ar-EG');
+
+    holder = document.createElement('div');
+    holder.innerHTML = htmlBody;
+    var sourceTable = holder.querySelector('table');
+    var pages = [];
+
+    if (sourceTable) {
+      var head = sourceTable.querySelector('thead');
+      var bodyRows = Array.from(sourceTable.querySelectorAll('tbody tr'));
+      var foot = sourceTable.querySelector('tfoot');
+      var rowsPerPage = 18;
+      for (var start = 0; start < bodyRows.length; start += rowsPerPage) {
+        var table = sourceTable.cloneNode(false);
+        if (head) table.appendChild(head.cloneNode(true));
+        var tbody = document.createElement('tbody');
+        bodyRows.slice(start, start + rowsPerPage).forEach(function(row) {
+          tbody.appendChild(row.cloneNode(true));
+        });
+        table.appendChild(tbody);
+        if (foot && start + rowsPerPage >= bodyRows.length) {
+          table.appendChild(foot.cloneNode(true));
+        }
+        pages.push(table.outerHTML);
+      }
+      if (!pages.length) pages.push(sourceTable.outerHTML);
+    } else {
+      pages.push(htmlBody);
+    }
+
+    for (var pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      var page = document.createElement('div');
+      page.style.cssText = [
+        'position:absolute', 'left:-10000px', 'top:0', 'width:794px',
+        'padding:28px 36px 36px', 'background:#fff', 'color:#1e293b',
+        'font-family:Cairo,Tahoma,Arial,sans-serif', 'direction:rtl',
+        'font-size:13px', 'line-height:1.7', 'box-sizing:border-box'
+      ].join(';');
+      page.innerHTML =
+        '<style>' + _PDF_STYLE + '</style>' +
+        '<h1>' + esc(instName) + '</h1>' +
+        '<h2>' + esc(title) + '</h2>' +
+        '<p class="sub">تاريخ الإنشاء: ' + now +
+        ' — العملة: ليرة سورية (ل.س) — الصفحة ' + (pageIndex + 1) +
+        ' من ' + pages.length + '</p><hr>' + pages[pageIndex] +
+        (pageIndex === pages.length - 1
+          ? '<div class="footer">' + esc(instName) + ' — جميع الحقوق محفوظة</div>'
+          : '');
+      document.body.appendChild(page);
+      await new Promise(function(resolve) { setTimeout(resolve, 40); });
+      var renderH = Math.max(page.scrollHeight, page.offsetHeight, 300);
+      var canvas = await html2canvas(page, {
+        scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#fff',
+        logging: false, width: 794, height: renderH, windowWidth: 794,
+        windowHeight: renderH, x: 0, y: 0, scrollX: 0, scrollY: 0
+      });
+      var imgData = canvas.toDataURL('image/jpeg', 0.96);
+      var naturalH = (canvas.height / canvas.width) * contentW;
+      var drawW = contentW, drawH = naturalH;
+      if (drawH > contentH) {
+        drawH = contentH;
+        drawW = (canvas.width / canvas.height) * drawH;
+      }
+      var x = margin + (contentW - drawW) / 2;
+      if (pageIndex > 0) doc.addPage();
+      doc.addImage(imgData, 'JPEG', x, margin, drawW, drawH);
+      page.remove();
+    }
+
+    var safeTitle = title.replace(/[\/\\:*?"<>|]/g, '_');
+    doc.save(safeTitle + '_' + new Date().toLocaleDateString('en-CA') + '.pdf');
+    showToast('success', 'تم التصدير', 'تم تصدير جميع الصفوف والأعمدة إلى PDF');
+  } catch (err) {
+    showToast('error', 'خطأ', 'فشل إنشاء PDF: ' + err.message);
+    console.error('_downloadPDFComplete error:', err);
+  } finally {
+    if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+    hideLoading();
+  }
+}
+
 function generateTablePDF(title, wrapper) {
   var table = wrapper && wrapper.querySelector ? wrapper.querySelector('table') : null;
   if (!table) { showToast('warning', 'تنبيه', 'لا توجد بيانات للطباعة'); return; }
@@ -3374,7 +3603,7 @@ function _tableHtmlForExport(wrapper) {
 function exportSuppliersPDF() {
   var h = _tableHtmlForExport(document.querySelector('#page-suppliers .table-wrapper'));
   if (!h) { showToast('warning','تنبيه','لا توجد بيانات'); return; }
-  _downloadPDF(h, 'المستودعات');
+  _downloadPDFComplete(h, 'المستودعات');
 }
 function exportInvoicesPDF() {
   // لا نعتمد على الجدول المعروض لأن المستخدم قد يكون في وضع الفواتير المخفية.
@@ -3383,7 +3612,7 @@ function exportInvoicesPDF() {
   if (!activeInvoices.length) { showToast('warning','تنبيه','لا توجد فواتير ظاهرة للتصدير'); return; }
   var h = _tableHtmlForExportFromHtml(buildInvoicesTable(activeInvoices));
   if (!h) { showToast('warning','تنبيه','لا توجد بيانات'); return; }
-  _downloadPDF(h, 'الفواتير');
+  _downloadPDFComplete(h, 'الفواتير');
 }
 
 function _tableHtmlForExportFromHtml(html) {
@@ -3395,13 +3624,13 @@ function _tableHtmlForExportFromHtml(html) {
 function exportPaymentsPDF() {
   var h = _tableHtmlForExport(document.querySelector('#page-payments .table-wrapper'));
   if (!h) { showToast('warning','تنبيه','لا توجد بيانات'); return; }
-  _downloadPDF(h, 'الدفعات');
+  _downloadPDFComplete(h, 'الدفعات');
 }
 function exportReportPDF() {
   var title = (document.getElementById('report-result-title')?.textContent || 'تقرير').trim();
   var h = _tableHtmlForExport(document.getElementById('report-table-wrapper'));
   if (!h) { showToast('warning','تنبيه','لا توجد بيانات'); return; }
-  _downloadPDF(h, title);
+  _downloadPDFComplete(h, title);
 }
 
 function printReport() {
@@ -3451,7 +3680,7 @@ async function exportStatementPDF() {
   if (!supplierName) { showToast('warning','تنبيه','يرجى اختيار مستودع أولاً'); return; }
   var tableHtml = _stmtTableHtml();
   if (!tableHtml) { showToast('warning','تنبيه','لا توجد حركات للتصدير'); return; }
-  _downloadPDF(tableHtml, 'كشف_حساب_' + supplierName);
+  _downloadPDFComplete(tableHtml, 'كشف_حساب_' + supplierName);
 }
 
 async function exportStatementExcel() {
